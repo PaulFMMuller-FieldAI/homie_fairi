@@ -69,6 +69,7 @@ class XRTeleopInterface:
         self,
         xr_websocket_url: str = "ws://localhost:8080",  # Default Unitree XR server
         enable_pedals: bool = True,
+        enable_xr: bool = False,  # Enable XR WebSocket connection
         command_scale: Dict[str, float] = None,
         smoothing_factor: float = 0.8,
         deadzone: float = 0.05
@@ -79,12 +80,14 @@ class XRTeleopInterface:
         Args:
             xr_websocket_url: WebSocket URL for Unitree XR teleoperate server
             enable_pedals: Enable pedal input support
+            enable_xr: Enable XR WebSocket connection (set to False if only using pedals)
             command_scale: Scaling factors for commands (x_vel, y_vel, yaw_vel, height)
             smoothing_factor: Smoothing factor for command filtering (0-1, higher = smoother)
             deadzone: Deadzone threshold for commands
         """
         self.xr_websocket_url = xr_websocket_url
         self.enable_pedals = enable_pedals
+        self.enable_xr = enable_xr
         self.smoothing_factor = smoothing_factor
         self.deadzone = deadzone
         
@@ -229,8 +232,8 @@ class XRTeleopInterface:
         
         self.running = True
         
-        # Start WebSocket connection for XR data
-        if WEBSOCKET_AVAILABLE:
+        # Start WebSocket connection for XR data (only if XR is enabled)
+        if self.enable_xr and WEBSOCKET_AVAILABLE:
             self.ws_thread = threading.Thread(target=self._websocket_loop, daemon=True)
             self.ws_thread.start()
         
@@ -260,7 +263,8 @@ class XRTeleopInterface:
             self.pedal_thread.start()
         
         print("XR Teleoperation Interface started")
-        print(f"  - XR WebSocket: {self.xr_websocket_url}")
+        if self.enable_xr:
+            print(f"  - XR WebSocket: {self.xr_websocket_url}")
         print(f"  - Pedals: {'Enabled' if self.enable_pedals else 'Disabled'}")
         if PYNPUT_AVAILABLE and self.enable_pedals:
             print(f"  - Keyboard capture: pynput (global, no focus needed)")
@@ -444,6 +448,10 @@ class XRTeleopInterface:
         
         # If pedals are enabled, don't let XR update velocity commands
         # Pedals have exclusive control over velocity when enabled
+        # Also, if XR is not enabled, don't process XR data
+        if not self.enable_xr:
+            return
+        
         if self.enable_pedals:
             # Only update height from XR (pedals don't control height)
             # Don't update velocity commands - pedals control those

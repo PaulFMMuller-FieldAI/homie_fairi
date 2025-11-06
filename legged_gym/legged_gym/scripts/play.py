@@ -80,14 +80,19 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
     env_cfg.terrain.mesh_type = 'plane'
     env_cfg.asset.self_collision = 0
     
-    # Initialize XR teleoperation interface if enabled
+    # Initialize XR teleoperation interface if enabled, or if pedals are enabled
     xr_interface = None
-    if use_xr_teleop:
-        # Enable upper body teleoperation if XR is enabled
-        env_cfg.env.upper_teleop = True
+    if use_xr_teleop or enable_pedals:
+        # Enable upper body teleoperation only if XR is enabled
+        if use_xr_teleop:
+            env_cfg.env.upper_teleop = True
+        else:
+            env_cfg.env.upper_teleop = False
+        
         xr_interface = XRTeleopInterface(
             xr_websocket_url=xr_websocket_url,
             enable_pedals=enable_pedals,
+            enable_xr=use_xr_teleop,  # Only enable WebSocket if XR teleop is requested
             command_scale={
                 'x_vel': env_cfg.commands.ranges.lin_vel_x[1],
                 'y_vel': env_cfg.commands.ranges.lin_vel_y[1],
@@ -98,9 +103,12 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
             deadzone=0.05
         )
         xr_interface.start()
-        print("XR Teleoperation enabled")
-        print(f"  - WebSocket: {xr_websocket_url}")
-        print(f"  - Pedals: {'Enabled' if enable_pedals else 'Disabled'}")
+        if use_xr_teleop:
+            print("XR Teleoperation enabled")
+            print(f"  - WebSocket: {xr_websocket_url}")
+        if enable_pedals:
+            print("Pedal control enabled")
+            print(f"  - Pedals: Enabled")
     else:
         env_cfg.env.upper_teleop = False
     
@@ -114,15 +122,22 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
     obs = env.get_observations()
     
     # load policy
-    train_cfg.runner.resume = True
-    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
-    
-    # Load checkpoint if path is provided
+    # If checkpoint_path is provided, use it; otherwise use resume from config
     if checkpoint_path is not None:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
         print(f"Loading checkpoint from: {checkpoint_path}")
+        # Set resume to False if we're loading a specific checkpoint
+        train_cfg.runner.resume = False
+    else:
+        train_cfg.runner.resume = True
+    
+    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
+    
+    # Load checkpoint if path is provided (after runner is created)
+    if checkpoint_path is not None:
         ppo_runner.load(checkpoint_path)
+        print(f"Successfully loaded checkpoint: {checkpoint_path}")
     
     policy = ppo_runner.get_inference_policy(device=env.device) # Use this to load from trained pt file
     
@@ -148,16 +163,16 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
             # Get actions from policy
             actions = policy(obs.detach())
             
-            # Get teleoperation commands if enabled
-            if use_xr_teleop and xr_interface:
+            # Get teleoperation commands if enabled (XR or pedals)
+            if xr_interface:
                 commands = xr_interface.get_commands()
                 env.commands[:, 0] = commands['x_vel']
                 env.commands[:, 1] = commands['y_vel']
                 env.commands[:, 2] = commands['yaw_vel']
                 env.commands[:, 4] = commands['height']
                 
-                # Handle upper body teleoperation if enabled
-                if env_cfg.env.upper_teleop and xr_interface.get_upper_body_enabled():
+                # Handle upper body teleoperation if enabled (XR only)
+                if use_xr_teleop and env_cfg.env.upper_teleop and xr_interface.get_upper_body_enabled():
                     left_hand, right_hand = xr_interface.get_hand_poses()
                     if left_hand is not None and right_hand is not None:
                         # Map hand poses to upper body actions
@@ -182,8 +197,8 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
             
             iteration += 1
             
-            # Print teleoperation status periodically
-            if use_xr_teleop and xr_interface:
+            # Print teleoperation status periodically (XR or pedals)
+            if xr_interface and enable_pedals:
                 commands = xr_interface.get_commands()
                 pedal_states = xr_interface.get_pedal_states()
                 
@@ -212,8 +227,8 @@ if __name__ == '__main__':
     RECORD_FRAMES = False
     MOVE_CAMERA = False
     
-    # Parse additional arguments for XR teleoperation first
-    # This is done before get_args() to avoid conflicts
+    # Parse additional arguments for XR teleoperation FIRST
+    # This must be done before get_args() since get_args() consumes all sys.argv
     parser = argparse.ArgumentParser(description='Additional XR teleoperation arguments', add_help=False)
     parser.add_argument('--use-xr-teleop', action='store_true', 
                         help='Enable XR teleoperation (Apple Vision Pro + pedals)')
@@ -234,31 +249,33 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint-path', type=str, default=None,
                         help='Direct path to checkpoint file (e.g., /path/to/model_2600.pt). Overrides config resume settings.')
     
-    # Parse XR args first, keeping unknown args for get_args()
-    xr_args, remaining_args = parser.parse_known_args()
+    # Parse only known args and remove them from sys.argv before calling get_args()
+    xr_args, remaining_argv = parser.parse_known_args()
     
-    # Temporarily replace sys.argv to pass only remaining args to get_args()
-    original_argv = sys.argv.copy()
-    # Filter out the XR-specific arguments from sys.argv
+    # Remove XR-specific arguments from sys.argv so get_args() doesn't see them
+    xr_arg_names = ['--use-xr-teleop', '--disable-pedals', '--xr-websocket-url', 
+                    '--enable-pedals', '--x-vel', '--y-vel', '--yaw-vel', 
+                    '--height', '--checkpoint-path']
     filtered_argv = [sys.argv[0]]  # Keep script name
     skip_next = False
-    for arg in sys.argv[1:]:
+    for i, arg in enumerate(sys.argv[1:], 1):
         if skip_next:
             skip_next = False
             continue
-        if arg in ['--use-xr-teleop', '--disable-pedals']:
-            continue
-        elif arg in ['--xr-websocket-url', '--x-vel', '--y-vel', '--yaw-vel', '--height', '--checkpoint-path', '--enable-pedals']:
-            skip_next = True  # Skip the value too
+        if arg in xr_arg_names:
+            # Skip this argument and its value if it takes one
+            if arg in ['--xr-websocket-url', '--x-vel', '--y-vel', '--yaw-vel', 
+                       '--height', '--checkpoint-path']:
+                skip_next = True  # Skip the value too
             continue
         filtered_argv.append(arg)
     
+    # Temporarily replace sys.argv, call get_args(), then restore
+    original_argv = sys.argv.copy()
     sys.argv = filtered_argv
     try:
-        # Get standard args with filtered arguments
         args = get_args()
     finally:
-        # Restore original argv
         sys.argv = original_argv
     
     play(
