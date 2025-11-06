@@ -99,6 +99,11 @@ class XRTeleopInterface:
             'height': 0.5      # m (relative to default)
         }
         
+        # Height control parameters
+        self.height_step = 0.02  # Height adjustment step per key press (m)
+        self.height_min = 0.24   # Minimum height (m)
+        self.height_max = 0.74   # Maximum height (robot base height, m)
+        
         # Current commands (filtered)
         self.current_commands = {
             'x_vel': 0.0,
@@ -561,12 +566,12 @@ class XRTeleopInterface:
             # Handle character keys - pynput provides key.char for character keys
             char = None
             if hasattr(key, 'char') and key.char is not None:
-                char = key.char.lower()
+                char = key.char  # Keep original case for '+' and '-'
             elif hasattr(key, 'vk') and hasattr(key, 'name'):
                 # Try to get character from virtual key code
                 # For 'a', 'b', 'c' we can check the name or vk
                 if key.name and len(key.name) == 1:
-                    char = key.name.lower()
+                    char = key.name  # Keep original case
                 elif hasattr(key, 'vk'):
                     # Map virtual key codes for a, b, c (65, 66, 67 in ASCII)
                     if key.vk == 65 or key.vk == ord('a'):
@@ -575,19 +580,50 @@ class XRTeleopInterface:
                         char = 'b'
                     elif key.vk == 67 or key.vk == ord('c'):
                         char = 'c'
+                    # Map '+' and '-' keys (try common virtual key codes)
+                    # On Linux, these might be detected via char, but we try vk as fallback
+                    elif key.vk in [0xBB, 0x6B, 0x3D]:  # '+' or '=' key (varies by layout)
+                        char = '+' if key.vk != 0x3D else '='
+                    elif key.vk in [0xBD, 0x6D]:  # '-' key
+                        char = '-'
             
-            if char == 'a':
+            # Also check if key.name is '=' (which is '+' on US keyboards when shift is pressed)
+            # But pynput should give us the actual character, so this is a fallback
+            if char is None and hasattr(key, 'name'):
+                if key.name == '=':
+                    # Check if shift is pressed (on US keyboard, shift+'=' = '+')
+                    # For simplicity, we'll treat '=' as '+' for height increase
+                    char = '+'
+                elif key.name == '-':
+                    char = '-'
+            
+            # Handle pedal keys (lowercase)
+            char_lower = char.lower() if char else None
+            if char_lower == 'a':
                 self.pedal_states['left'] = True
                 print("[PEDAL] Key 'a' pressed (left) - pynput")
                 self._pedals_to_commands()
-            elif char == 'b':
+            elif char_lower == 'b':
                 self.pedal_states['forward'] = True
                 print("[PEDAL] Key 'b' pressed (forward) - pynput")
                 self._pedals_to_commands()
-            elif char == 'c':
+            elif char_lower == 'c':
                 self.pedal_states['right'] = True
                 print("[PEDAL] Key 'c' pressed (right) - pynput")
                 self._pedals_to_commands()
+            # Handle height adjustment keys ('+' or '=' for increase, '-' for decrease)
+            elif char == '+' or char == '=':
+                # Increase height
+                new_height = min(self.current_commands['height'] + self.height_step, self.height_max)
+                self.current_commands['height'] = new_height
+                self.raw_commands['height'] = new_height
+                print(f"[HEIGHT] Increased to {new_height:.3f}m (max: {self.height_max:.3f}m)")
+            elif char == '-':
+                # Decrease height
+                new_height = max(self.current_commands['height'] - self.height_step, self.height_min)
+                self.current_commands['height'] = new_height
+                self.raw_commands['height'] = new_height
+                print(f"[HEIGHT] Decreased to {new_height:.3f}m (min: {self.height_min:.3f}m)")
         except Exception as e:
             print(f"Error in key press handler: {e}")
     

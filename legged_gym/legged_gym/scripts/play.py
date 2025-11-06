@@ -138,6 +138,33 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
     if checkpoint_path is not None:
         ppo_runner.load(checkpoint_path)
         print(f"Successfully loaded checkpoint: {checkpoint_path}")
+        
+        # Compile and save JIT policy next to checkpoint
+        try:
+            checkpoint_dir = os.path.dirname(os.path.abspath(checkpoint_path))
+            checkpoint_name = os.path.splitext(os.path.basename(checkpoint_path))[0]
+            jit_path = os.path.join(checkpoint_dir, f"{checkpoint_name}_jit.pt")
+            
+            # Get the actor_critic model for compilation
+            actor_critic = ppo_runner.alg.actor_critic
+            
+            # Compile with torch.jit based on model type
+            if hasattr(actor_critic, 'estimator'):
+                # HIM model with estimator
+                from legged_gym.utils.helpers import PolicyExporterHIM
+                exporter = PolicyExporterHIM(actor_critic)
+                exporter.to('cpu')
+                jit_model = torch.jit.script(exporter)
+            else:
+                # Standard actor model
+                model = actor_critic.actor.to('cpu')
+                jit_model = torch.jit.script(model)
+            
+            # Save compiled model
+            jit_model.save(jit_path)
+            print(f"Compiled and saved JIT policy to: {jit_path}")
+        except Exception as e:
+            print(f"Warning: Failed to compile JIT policy: {e}")
     
     policy = ppo_runner.get_inference_policy(device=env.device) # Use this to load from trained pt file
     
@@ -212,7 +239,7 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
                           f"x_vel={commands['x_vel']:6.3f} "
                           f"y_vel={commands['y_vel']:6.3f} "
                           f"yaw_vel={commands['yaw_vel']:6.3f} "
-                          f"height={commands['height']:5.3f}")
+                          f"height={commands['height']:5.3f}m")
     
     except KeyboardInterrupt:
         print("\nInterrupted by user")
