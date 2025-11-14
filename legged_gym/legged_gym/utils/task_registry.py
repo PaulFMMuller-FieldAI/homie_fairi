@@ -149,9 +149,29 @@ class TaskRegistry():
         resume = args.resume
         if resume:
             # load previously trained model
-            resume_path = "./example_model.pt"
+            # Get the experiment root directory (where runs are stored)
+            experiment_name = getattr(train_cfg.runner, 'experiment_name', '')
+            if experiment_name:
+                experiment_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', experiment_name)
+            else:
+                experiment_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs')
+            # Get load_run and checkpoint from config (default to -1 if not set)
+            load_run = getattr(train_cfg.runner, 'load_run', -1)
+            checkpoint = getattr(train_cfg.runner, 'checkpoint', -1)
+            # Convert load_run to -1 if it's the string "-1"
+            if isinstance(load_run, str) and load_run == "-1":
+                load_run = -1
+            # Convert checkpoint to -1 if it's the string "-1" or None
+            if checkpoint is None or (isinstance(checkpoint, str) and checkpoint == "-1"):
+                checkpoint = -1
+            resume_path = get_load_path(experiment_root, load_run, checkpoint)
+            load_optimizer = getattr(args, 'load_optimizer', False)
             print(f"Loading model from: {resume_path}")
-            runner.load(resume_path)
+            if load_optimizer:
+                print("Loading optimizer state from checkpoint")
+            else:
+                print("Note: Optimizer state will NOT be loaded (starting with fresh optimizer)")
+            runner.load(resume_path, load_optimizer=load_optimizer)
         return runner, train_cfg
 
 # make global task registry

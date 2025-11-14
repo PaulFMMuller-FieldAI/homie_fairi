@@ -545,6 +545,10 @@ class LeggedRobot(BaseTask):
         """
         #pd controller
         actions_scaled = actions * self.cfg.control.action_scale
+        # Scale down upper body actions if arm_action_scale_factor is set (for play mode)
+        if hasattr(self, '_arm_action_scale_factor') and hasattr(self, 'num_lower_dof'):
+            actions_scaled[:, self.num_lower_dof:] = actions_scaled[:, self.num_lower_dof:] * self._arm_action_scale_factor
+
         self.joint_pos_target = self.default_dof_pos + actions_scaled
         control_type = self.cfg.control.control_type
         if control_type=="P":

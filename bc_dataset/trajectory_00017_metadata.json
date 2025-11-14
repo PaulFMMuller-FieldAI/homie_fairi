@@ -1,0 +1,11 @@
+{
+  "traj_idx": 17,
+  "duration": 10.0,
+  "frequency": 50.0,
+  "dt": 0.02,
+  "num_steps": 500,
+  "obs_dim": 67,
+  "action_dim": 29,
+  "command_dim": 4,
+  "timestamp": "2025-11-13T20:40:27.134229"
+}

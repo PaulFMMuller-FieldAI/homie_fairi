@@ -59,7 +59,7 @@ def load_onnx_policy():
         return torch.tensor(ort_outs[0], device="cuda:0")
     return run_inference
 
-def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=False, xr_websocket_url="ws://localhost:8080", enable_pedals=True, checkpoint_path=None):
+def play_straightarms(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=False, xr_websocket_url="ws://localhost:8080", enable_pedals=True, checkpoint_path=None):
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # Force only 1 environment for play mode (override args.num_envs if set)
@@ -289,11 +289,11 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
         'left_shoulder_pitch': (0.0 - left_shoulder_pitch_default) / action_scale,  # Arms down
         'left_shoulder_roll': (0.0 - left_shoulder_roll_default) / action_scale,
         'left_shoulder_yaw': 0.0,
-        'left_elbow': (0.0 - left_elbow_default) / action_scale,  # Straight
+        'left_elbow': (np.pi/2 - left_elbow_default) / action_scale,  # 90 degrees bend
         'right_shoulder_pitch': (0.0 - right_shoulder_pitch_default) / action_scale,
         'right_shoulder_roll': (0.0 - right_shoulder_roll_default) / action_scale,
         'right_shoulder_yaw': 0.0,
-        'right_elbow': (0.0 - right_elbow_default) / action_scale,
+        'right_elbow': (np.pi/2 - right_elbow_default) / action_scale,  # 90 degrees bend
     }
     
     # Pose list: straight_body, straight_front_low_noise, straight_front_high_noise, bent_90
@@ -302,7 +302,7 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
     
     # Noise parameters
     low_noise_scale = 0.1   # 10% variation for low noise pose
-    high_noise_scale = 3  # 1000% variation for high noise pose
+    high_noise_scale = 2  # 1000% variation for high noise pose
     
     # Time distribution (HOMIE curriculum): 40% high noise, 40% low noise, 10% straight body, 10% bent 90
     pose_weights = [0.1, 0.4, 0.4, 0.1]  # Probabilities for each pose
@@ -321,6 +321,9 @@ def play(args, x_vel=0.0, y_vel=0.0, yaw_vel=0.0, height=0.74, use_xr_teleop=Fal
     transition_start_time = 0.0
     transition_start_pose = pose_straight_body.copy()
     transition_target_pose = pose_straight_front_low_noise.copy()
+    
+    # Initialize current_pose with the starting pose
+    current_pose = poses[current_pose_idx].copy()
     
     # High noise pose interpolation state (for HOMIE-style linear interpolation)
     high_noise_current_pose = pose_straight_front_base.copy()  # Current interpolated pose
@@ -597,7 +600,7 @@ if __name__ == '__main__':
     finally:
         sys.argv = original_argv
     
-    play(
+    play_straightarms(
         args,
         x_vel=xr_args.x_vel,
         y_vel=xr_args.y_vel,
@@ -608,3 +611,4 @@ if __name__ == '__main__':
         enable_pedals=xr_args.enable_pedals,
         checkpoint_path=xr_args.checkpoint_path
     )
+

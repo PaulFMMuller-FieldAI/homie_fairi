@@ -166,7 +166,7 @@ class G1RoughCfg( LeggedRobotCfg ):
         randomize_payload_mass = use_random
         payload_mass_range = [-5, 10]
         
-        hand_payload_mass_range = [-0.1, 0.3]
+        hand_payload_mass_range = [-0.1, 1.0]
 
         randomize_com_displacement = False
         com_displacement_range = [-0.1, 0.1]
@@ -284,6 +284,7 @@ class G1RoughCfgPPO( LeggedRobotCfgPPO ):
         use_flip = True
         entropy_coef = 0.01
         symmetry_scale = 1.0
+        kl_divergence_coef = 0.0  # KL divergence coefficient between training policy and initial policy
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'HIMActorCritic'
         algorithm_class_name = 'HIMPPO'

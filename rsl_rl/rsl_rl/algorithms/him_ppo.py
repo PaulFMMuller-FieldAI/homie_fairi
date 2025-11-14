@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -54,6 +55,7 @@ class HIMPPO:
                  desired_kl=0.01,
                  device='cpu',
                  symmetry_scale=1e-3,
+                 kl_divergence_coef=0.0,
                  ):
 
         self.device = device
@@ -77,10 +79,36 @@ class HIMPPO:
         self.num_mini_batches = num_mini_batches
         self.value_loss_coef = value_loss_coef
         self.entropy_coef = entropy_coef
+        self.kl_divergence_coef = kl_divergence_coef
         self.gamma = gamma
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        
+        # Store frozen copy of initial policy for KL divergence
+        if self.kl_divergence_coef > 0.0:
+            self.initial_policy_actor = copy.deepcopy(self.actor_critic.actor)
+            self.initial_policy_actor.to(self.device)
+            self.initial_policy_actor.eval()  # Set to eval mode for consistent behavior
+            # Freeze the initial policy
+            for param in self.initial_policy_actor.parameters():
+                param.requires_grad = False
+            # Store initial std (frozen)
+            self.initial_policy_std = self.actor_critic.std.data.clone().detach()
+            # Also need to store estimator and terrain encoder for computing initial policy mean
+            self.initial_policy_estimator = copy.deepcopy(self.actor_critic.estimator)
+            self.initial_policy_estimator.to(self.device)
+            self.initial_policy_estimator.eval()  # Set to eval mode
+            for param in self.initial_policy_estimator.parameters():
+                param.requires_grad = False
+            if hasattr(self.actor_critic, 'terrain_encoder') and self.actor_critic.terrain_encoder is not None:
+                self.initial_policy_terrain_encoder = copy.deepcopy(self.actor_critic.terrain_encoder)
+                self.initial_policy_terrain_encoder.to(self.device)
+                self.initial_policy_terrain_encoder.eval()  # Set to eval mode
+                for param in self.initial_policy_terrain_encoder.parameters():
+                    param.requires_grad = False
+            else:
+                self.initial_policy_terrain_encoder = None
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = HIMRolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
@@ -145,6 +173,7 @@ class HIMPPO:
         mean_swap_loss = 0
         mean_actor_sym_loss = 0
         mean_critic_sym_loss = 0
+        mean_kl_divergence_loss = 0.0
         
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
@@ -156,6 +185,27 @@ class HIMPPO:
                 mu_batch = self.actor_critic.action_mean
                 sigma_batch = self.actor_critic.action_std
                 entropy_batch = self.actor_critic.entropy
+                
+                # Compute KL divergence between current policy and initial policy
+                kl_divergence_loss = 0.0
+                if self.kl_divergence_coef > 0.0:
+                    with torch.no_grad():
+                        # Compute initial policy mean using frozen initial policy
+                        vel_init, dynamic_latent_init = self.initial_policy_estimator(obs_batch[:, 0:self.actor_critic.actor_proprioceptive_obs_length])
+                        if self.actor_critic.actor_use_height:
+                            terrain_latent_init = self.initial_policy_terrain_encoder(obs_batch[:, -(self.actor_critic.num_height_points + self.actor_critic.num_one_step_obs):])
+                            actor_input_init = torch.cat((obs_batch[:, -(self.actor_critic.num_height_points + self.actor_critic.num_one_step_obs):-self.actor_critic.num_height_points], 
+                                                          vel_init, dynamic_latent_init, terrain_latent_init), dim=-1)
+                        else:
+                            actor_input_init = torch.cat((obs_batch[:, -self.actor_critic.num_one_step_obs:], vel_init, dynamic_latent_init), dim=-1)
+                        mu_init = self.initial_policy_actor(actor_input_init)
+                        sigma_init = self.initial_policy_std.unsqueeze(0).expand_as(mu_init)
+                    
+                    # Compute KL divergence: KL(N(μ, σ²) || N(μ_init, σ_init²))
+                    # Formula: log(σ_init/σ) + (σ² + (μ - μ_init)²) / (2*σ_init²) - 0.5
+                    kl_div = torch.log(sigma_init / (sigma_batch + 1e-8) + 1e-8) + \
+                             (torch.square(sigma_batch) + torch.square(mu_batch - mu_init)) / (2.0 * torch.square(sigma_init) + 1e-8) - 0.5
+                    kl_divergence_loss = torch.sum(kl_div, dim=-1).mean()
 
                 # KL
                 if self.desired_kl != None and self.schedule == 'adaptive':
@@ -202,9 +252,9 @@ class HIMPPO:
                     flipped_critic_obs_batch = self.flip_g1_critic_obs(critic_obs_batch)
                     actor_sym_loss = self.symmetry_scale * torch.mean(torch.sum(torch.square(self.actor_critic.act_inference(flipped_obs_batch) - self.flip_g1_actions(self.actor_critic.act_inference(obs_batch))), dim=-1))
                     critic_sym_loss = self.symmetry_scale * torch.mean(torch.square(self.actor_critic.evaluate(flipped_critic_obs_batch) - self.actor_critic.evaluate(critic_obs_batch).detach()))
-                    loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + actor_sym_loss + critic_sym_loss
+                    loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + actor_sym_loss + critic_sym_loss + self.kl_divergence_coef * kl_divergence_loss
                 else:
-                    loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                    loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + self.kl_divergence_coef * kl_divergence_loss
 
                 # Gradient step
                 self.optimizer.zero_grad()
@@ -216,6 +266,8 @@ class HIMPPO:
                 mean_surrogate_loss += surrogate_loss.item()
                 mean_estimation_loss += estimation_loss
                 mean_swap_loss += swap_loss
+                if self.kl_divergence_coef > 0.0:
+                    mean_kl_divergence_loss += kl_divergence_loss.item()
                 if self.use_flip:
                     mean_actor_sym_loss += actor_sym_loss.item()
                     mean_critic_sym_loss += critic_sym_loss.item()
@@ -225,15 +277,17 @@ class HIMPPO:
         mean_surrogate_loss /= num_updates
         mean_estimation_loss /= num_updates
         mean_swap_loss /= num_updates
+        if self.kl_divergence_coef > 0.0:
+            mean_kl_divergence_loss /= num_updates
         if self.use_flip:
             mean_actor_sym_loss /= num_updates
             mean_critic_sym_loss /= num_updates
         self.storage.clear()
 
         if self.use_flip:
-            return mean_value_loss, mean_surrogate_loss, mean_estimation_loss, mean_swap_loss, mean_actor_sym_loss, mean_critic_sym_loss
+            return mean_value_loss, mean_surrogate_loss, mean_estimation_loss, mean_swap_loss, mean_actor_sym_loss, mean_critic_sym_loss, mean_kl_divergence_loss
         else:
-            return mean_value_loss, mean_surrogate_loss, estimation_loss, swap_loss, 0, 0
+            return mean_value_loss, mean_surrogate_loss, mean_estimation_loss, mean_swap_loss, 0, 0, mean_kl_divergence_loss
     
     def flip_g1_actor_obs(self, obs):
         proprioceptive_obs = torch.clone(obs[:, :self.actor_critic.num_one_step_obs * self.actor_critic.actor_history_length])

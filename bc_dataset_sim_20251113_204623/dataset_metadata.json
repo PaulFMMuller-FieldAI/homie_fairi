@@ -1,0 +1,8 @@
+{
+  "num_trajectories": 0,
+  "traj_duration": 10.0,
+  "frequency": 50.0,
+  "collection_timestamp": "2025-11-13T20:46:31.807937",
+  "source": "isaac_gym",
+  "task": "g1"
+}
